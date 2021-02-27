@@ -1,0 +1,4 @@
+﻿  Source.cpp
+I:\RayTracer434\RayTracer434\Source.cpp(7,2): error C2059: syntax error: 'return'
+I:\RayTracer434\RayTracer434\Source.cpp(8,1): error C2059: syntax error: '}'
+I:\RayTracer434\RayTracer434\Source.cpp(8,1): error C2143: syntax error: missing ';' before '}'

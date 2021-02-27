@@ -1,0 +1,25 @@
+{
+    "MetaData" : {
+        "Fps" : 10,
+        "Time" : 1
+    },
+    "Instructions" : [
+        {
+            "Name" : "Sphere1",
+            "StartT" : 0,
+            "EndT" : 1,
+            "MoveType" : 0,
+            "StartPos" : [0,0,0],
+            "EndPos" : [-150, 0,0]
+        },
+        {
+            "Name" : "Sphere2",
+            "StartT" : 0,
+            "EndT" : 1,
+            "MoveType" : 0,
+            "StartPos" : [0, 60, 75],
+            "EndPos" : [150, 60, 75]
+        }
+
+    ]
+}
