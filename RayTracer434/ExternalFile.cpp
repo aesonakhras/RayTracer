@@ -2,14 +2,16 @@
 
 
 std::string ExternalFile::Load(const std::string fileName) {
-    std::string fileString = "";
+    std::string fileString;
     std::ifstream file(fileName);
     std::string line;
+
     if (file.is_open()) {
         fileString = std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+       
     }
-
     return fileString;
+    
 }
 
 void ExternalFile::BMPInit(int width, int height) {
@@ -83,6 +85,11 @@ void ExternalFile::BMPBuffer(int x, int y, CV::ColorBMP color) {
 void ExternalFile::BMPWrite(std::string name) {
     FILE* pFile;
     errno_t err;
+
+    if (CreateDirectory(L"Results/", NULL)) {
+        
+    }
+
     std::string finalLoc = "Results/" + name;
 
     err = fopen_s(&pFile, finalLoc.c_str(), "wb");

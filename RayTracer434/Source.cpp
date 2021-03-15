@@ -1,6 +1,9 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <omp.h>
+#include <chrono>
+#include <time.h>
 
 #include "rapidjson/document.h"
 #include "rapidjson/pointer.h"
@@ -9,118 +12,24 @@
 #include "glm/glm.hpp"
 #include "glm/gtc/matrix_transform.hpp"
 #include "glm/gtx/compatibility.hpp"
+
+
 #include "CustomVec.h"
 #include "ExternalFile.h"
+#include "DataStructures.h"
+#include "Quad.h"
+#include "Sphere.h"
 
-#include <omp.h>
-
-#include <chrono>
-#include <time.h>
-
-
+//Name is too long that is why using
 using namespace rapidjson;
 
-enum MatType {
-	MIRROR,
-	DIFFUSE
-};
-
-struct GlobalData {
-	float Shininess;
-	int Antialias;
-	glm::vec3 bgColor;
-	int MaxDepth;
-	glm::vec2 Resolution;
-};
-
-struct Material {
-	glm::vec3 Diff;
-	glm::vec3 Spec;
-	glm::vec3 Amb;
-
-	MatType MatType;
-};
-
-struct LightData {
-	std::string Name;
-	
-	glm::vec3 Pos;
-	glm::vec3 Diff;
-	glm::vec3 Spec;
-};
-
-struct Sphere {
-	std::string Name;
-	glm::vec3 Pos;
-	float Radius;
-
-	Material Mat;
-};
-
- struct Quad {
-	std::string Name;
-	glm::vec3 Pos1;
-	glm::vec3 Pos2;
-	glm::vec3 Pos3;
-
-	Material Mat;
-};
-
- struct AnimMetaData {
-	 int Fps;
-	 float Time;
- };
-
- struct Instruction {
-	 std::string Name;
-	 float StartT;
-	 float EndT;
-	 float	MoveType;
-	 glm::vec3 StartPos;
-	 glm::vec3 EndPos;
-
-	 float LocalTime;
- };
-
-struct Ray {
-	glm::vec3 dir;
-	glm::vec3 origin;
-};
-
-struct Hit {
-	float t;
-	glm::vec3 location;
-	glm::vec3 normal;
-
-	//ref to the material of the hit object
-	Material* mat;
-
-	Hit() {
-		this->normal = glm::vec3(0);
-		this->location = glm::vec3(0);
-		this->mat = nullptr;
-	}
-};
-
-class IObject {
-
-};
-
-
-
-struct Cell {
-	std::vector<IObject> objects;
-};
-
-class Grid {
-	
-};
-
-
-
 std::vector<LightData> g_lights;
-std::vector<Sphere> g_spheres;
-std::vector<Quad> g_quads;
+
+std::vector<IGeometry*> g_geometry;
+
+//Handle to memory of the geometry
+//Put them close to help with cache
+char* g_geometryMem;
 
 std::vector<Instruction> g_animInstructions;
 
@@ -131,160 +40,218 @@ glm::vec3 g_eye;
 
 
 float g_aspectRatio;
-float g_fieldOfView = 60.0f;
+float g_fieldOfView = 45.0f;
 
-void SetVecFromJson(glm::vec3* vec, std::string name) {
+float g_colorRange = 255.f;
+int g_framesToRender = 0;
+float g_currentTime = 0.0f;
 
-}
+std::chrono::high_resolution_clock::time_point g_start;
 
-float colorRange = 255.f;
 
-void LoadScene() {
-	std::string sceneFile = ExternalFile::Load("Scene.json");
+bool LoadScene(std::string sceneName) {
+	std::string sceneFile = ExternalFile::Load(sceneName);
+
+	if (sceneFile.empty()) {
+		std::cout << "Unable to find scene Description Try program again\n";
+		//exit(EXIT_FAILURE);
+		return false;
+	}
 
 	rapidjson::Document d;
 	ParseResult result = d.Parse(sceneFile.c_str());
 	if (!result) {
 		fprintf(stderr, "JSON parse error: %s (%u)",
 			GetParseError_En(result.Code()), result.Offset());
-		exit(EXIT_FAILURE);
-		return;
+		//exit(EXIT_FAILURE);
+		return false;
 	}
 
 
-	rapidjson::Value& a = *GetValueByPointer(d, "/SceneSettings");
-	g_data.Shininess = a["SHININESS"].GetFloat();
+	rapidjson::Value& SceneSettings = *GetValueByPointer(d, "/SceneSettings");
+	g_data.Shininess = SceneSettings["SHININESS"].GetFloat();
 
-	g_data.Antialias = a["ANTIALIAS"].GetInt();
+	g_data.Antialias = SceneSettings["ANTIALIAS"].GetInt();
 
 
 	//Try to speed this up
-	g_data.bgColor.x = a["BACKGROUND"][0].GetFloat();
-	g_data.bgColor.y = a["BACKGROUND"][1].GetFloat();
-	g_data.bgColor.z = a["BACKGROUND"][2].GetFloat();
+	g_data.bgColor.x = SceneSettings["BACKGROUND"][0].GetFloat();
+	g_data.bgColor.y = SceneSettings["BACKGROUND"][1].GetFloat();
+	g_data.bgColor.z = SceneSettings["BACKGROUND"][2].GetFloat();
 
-	g_data.MaxDepth = a["MAXDEPTH"].GetInt();
+	g_data.MaxDepth = SceneSettings["MAXDEPTH"].GetInt();
 
-	g_data.Resolution.x = a["RESOLUTION"][0].GetInt();
-	g_data.Resolution.y = a["RESOLUTION"][1].GetInt();
+	g_data.Resolution.x = SceneSettings["RESOLUTION"][0].GetInt();
+	g_data.Resolution.y = SceneSettings["RESOLUTION"][1].GetInt();
 
 
 	//Get the Lights
-	a = *GetValueByPointer(d, "/Lights");
-	assert(a.IsArray());
+	rapidjson::Value& lights = *GetValueByPointer(d, "/Lights");
+	assert(lights.IsArray());
 
-	for (int i = 0; i < a.Size(); i++) {
+	for (int i = 0; i < lights.Size(); i++) {
 		LightData light;
 
-		light.Name = a[i]["Name"].GetString();
+		light.Name = lights[i]["Name"].GetString();
 
-		//How does this even work???
+		
 		//This is pretty cool!
-		light.Pos.x = a[i]["Pos"][0].GetFloat();
-		light.Pos.y = a[i]["Pos"][1].GetFloat();
-		light.Pos.z = a[i]["Pos"][2].GetFloat();
+		light.Pos.x = lights[i]["Pos"][0].GetFloat();
+		light.Pos.y = lights[i]["Pos"][1].GetFloat();
+		light.Pos.z = lights[i]["Pos"][2].GetFloat();
 
-		light.Diff.x = a[i]["Diff"][0].GetFloat() / colorRange;
-		light.Diff.y = a[i]["Diff"][1].GetFloat() / colorRange;
-		light.Diff.z = a[i]["Diff"][2].GetFloat() / colorRange;
+		light.Diff.x = lights[i]["Diff"][0].GetFloat() / g_colorRange;
+		light.Diff.y = lights[i]["Diff"][1].GetFloat() / g_colorRange;
+		light.Diff.z = lights[i]["Diff"][2].GetFloat() / g_colorRange;
 
-		light.Spec.x = a[i]["Spec"][0].GetFloat() / colorRange;
-		light.Spec.y = a[i]["Spec"][1].GetFloat() / colorRange;
-		light.Spec.z = a[i]["Spec"][2].GetFloat() / colorRange;
+		light.Spec.x = lights[i]["Spec"][0].GetFloat() / g_colorRange;
+		light.Spec.y = lights[i]["Spec"][1].GetFloat() / g_colorRange;
+		light.Spec.z = lights[i]["Spec"][2].GetFloat() / g_colorRange;
 
 		g_lights.push_back(light);
 	}
 
+
+
 	//Get Spheres
-	a = *GetValueByPointer(d, "/Spheres");
-	assert(a.IsArray());
+	rapidjson::Value& spheres = *GetValueByPointer(d, "/Spheres");
+	assert(spheres.IsArray());
+
+	rapidjson::Value& quads = *GetValueByPointer(d, "/Quads");
+	assert(quads.IsArray());
+
+	g_geometryMem = (char*)malloc((sizeof(Quad) * quads.Size()) + (sizeof(Sphere) * spheres.Size()));
 	
-	for (int i = 0; i < a.Size(); i++) {
-		Sphere sphere;
-		sphere.Name = a[i]["Name"].GetString();
+	//Start of sphere memory
+	char* sphereStartLocation = g_geometryMem + (sizeof(Quad) * quads.Size());
 
-		sphere.Pos.x = a[i]["Pos"][0].GetFloat();
-		sphere.Pos.y = a[i]["Pos"][1].GetFloat();
-		sphere.Pos.z = a[i]["Pos"][2].GetFloat();
+	for (int i = 0; i < spheres.Size(); i++) {
+		int matType = spheres[i]["MatType"].GetInt();
+		MatType type;
 
-		sphere.Radius = a[i]["Radius"].GetFloat();
+		if (matType == 0) {
+			type = MatType::MIRROR;
+		}
+		else {
+			type = MatType::DIFFUSE;
+		}
+
+		Sphere sphere = Sphere (
+			glm::vec3(
+				spheres[i]["Pos"][0].GetFloat(),
+				spheres[i]["Pos"][1].GetFloat(),
+				spheres[i]["Pos"][2].GetFloat()
+			),
+			spheres[i]["Radius"].GetFloat(),
 		
-		sphere.Mat.Diff.r = a[i]["Diff"][0].GetFloat() / colorRange;
-		sphere.Mat.Diff.g = a[i]["Diff"][1].GetFloat() / colorRange;
-		sphere.Mat.Diff.b = a[i]["Diff"][2].GetFloat() / colorRange;
+			//Material
+			glm::vec3(
+				spheres[i]["Diff"][0].GetFloat() / g_colorRange,
+				spheres[i]["Diff"][1].GetFloat() / g_colorRange,
+				spheres[i]["Diff"][2].GetFloat() / g_colorRange
+			),
+			glm::vec3(
+				spheres[i]["Spec"][0].GetFloat() / g_colorRange,
+				spheres[i]["Spec"][1].GetFloat() / g_colorRange,
+				spheres[i]["Spec"][2].GetFloat() / g_colorRange
+			),
+			glm::vec3(
+				spheres[i]["Amb"][0].GetFloat() / g_colorRange,
+				spheres[i]["Amb"][1].GetFloat() / g_colorRange,
+				spheres[i]["Amb"][2].GetFloat() / g_colorRange
+			),
+			type,
+			spheres[i]["Name"].GetString()
+		);
 
-		sphere.Mat.Spec.r = a[i]["Spec"][0].GetFloat() / colorRange;
-		sphere.Mat.Spec.g = a[i]["Spec"][1].GetFloat() / colorRange;
-		sphere.Mat.Spec.b = a[i]["Spec"][2].GetFloat() / colorRange;
 
-		sphere.Mat.Amb.r = a[i]["Amb"][0].GetFloat() / colorRange;
-		sphere.Mat.Amb.g = a[i]["Amb"][1].GetFloat() / colorRange;
-		sphere.Mat.Amb.b = a[i]["Amb"][2].GetFloat() / colorRange;
+		char* newSphere = sphereStartLocation + (i * sizeof(Sphere));
 
-		int matType = a[i]["MatType"].GetInt();
+		memcpy(newSphere, &sphere, sizeof(Sphere));
 
-		if (matType == 0) {
-			sphere.Mat.MatType = MatType::MIRROR;
-		}
-		else {
-			sphere.Mat.MatType = MatType::DIFFUSE;
-		}
+		g_geometry.push_back((IGeometry*)newSphere);
 
-		g_spheres.push_back(sphere);
 	}
 
-	a = *GetValueByPointer(d, "/Quads");
-	assert(a.IsArray());
 
-	for (int i = 0; i < a.Size(); i++) {
-		Quad quad;
 
-		quad.Name = a[i]["Name"].GetString();
 
-		quad.Pos1.x = a[i]["Pos1"][0].GetFloat();
-		quad.Pos1.y = a[i]["Pos1"][1].GetFloat();
-		quad.Pos1.z = a[i]["Pos1"][2].GetFloat();
 
-		quad.Pos2.x = a[i]["Pos2"][0].GetFloat();
-		quad.Pos2.y = a[i]["Pos2"][1].GetFloat();
-		quad.Pos2.z = a[i]["Pos2"][2].GetFloat();
-
-		quad.Pos3.x = a[i]["Pos3"][0].GetFloat();
-		quad.Pos3.y = a[i]["Pos3"][1].GetFloat();
-		quad.Pos3.z = a[i]["Pos3"][2].GetFloat();
-
-		quad.Mat.Diff.r = a[i]["Diff"][0].GetFloat() / colorRange;
-		quad.Mat.Diff.g = a[i]["Diff"][1].GetFloat() / colorRange;
-		quad.Mat.Diff.b = a[i]["Diff"][2].GetFloat() / colorRange;
-
-		quad.Mat.Spec.r = a[i]["Spec"][0].GetFloat() / colorRange;
-		quad.Mat.Spec.g = a[i]["Spec"][1].GetFloat() / colorRange;
-		quad.Mat.Spec.b = a[i]["Spec"][2].GetFloat() / colorRange;
-
-		quad.Mat.Amb.r = a[i]["Amb"][0].GetFloat() / colorRange;
-		quad.Mat.Amb.g = a[i]["Amb"][1].GetFloat() / colorRange;
-		quad.Mat.Amb.b = a[i]["Amb"][2].GetFloat() / colorRange;
-
-		int matType = a[i]["MatType"].GetInt();
+	for (int i = 0; i < quads.Size(); i++) {
+		int matType = quads[i]["MatType"].GetInt();
+		MatType type;
 
 		if (matType == 0) {
-			quad.Mat.MatType = MatType::MIRROR;
+			type = MatType::MIRROR;
 		}
 		else {
-			quad.Mat.MatType = MatType::DIFFUSE;
+			type = MatType::DIFFUSE;
 		}
 
-		g_quads.push_back(quad);
-	}
+		//yes this is a constructor
+		//I am sorry for its size, and lack of error checking
+		Quad quad = Quad(
 
+			//Positions	
+			glm::vec3(
+			quads[i]["Pos1"][0].GetFloat(),
+				quads[i]["Pos1"][1].GetFloat(),
+				quads[i]["Pos1"][2].GetFloat()
+			),
+
+			glm::vec3(
+				quads[i]["Pos2"][0].GetFloat(),
+				quads[i]["Pos2"][1].GetFloat(),
+				quads[i]["Pos2"][2].GetFloat()
+			),
+
+			glm::vec3(
+				quads[i]["Pos3"][0].GetFloat(),
+				quads[i]["Pos3"][1].GetFloat(),
+				quads[i]["Pos3"][2].GetFloat()
+			),
+
+			//diffuse
+			glm::vec3(
+				quads[i]["Diff"][0].GetFloat() / g_colorRange,
+				quads[i]["Diff"][1].GetFloat() / g_colorRange,
+				quads[i]["Diff"][2].GetFloat() / g_colorRange
+			),
+
+			//Specular
+			glm::vec3(
+				quads[i]["Spec"][0].GetFloat() / g_colorRange,
+				quads[i]["Spec"][1].GetFloat() / g_colorRange,
+				quads[i]["Spec"][2].GetFloat() / g_colorRange
+			),
+			//Ambient
+			glm::vec3 (
+				quads[i]["Amb"][0].GetFloat() / g_colorRange,
+				quads[i]["Amb"][1].GetFloat() / g_colorRange,
+				quads[i]["Amb"][2].GetFloat() / g_colorRange
+			),
+				//material type
+			type,
+			quads[i]["Name"].GetString()
+		);
+		char* newQuad = (char*)g_geometryMem + (i * sizeof(Quad));
+
+		memcpy(newQuad, &quad, sizeof(Quad));
+
+		g_geometry.push_back((IGeometry*)newQuad);
+	}
+	return true;
 }
-int g_framesToRender;
-void LoadAnimationDesc() {
+
+void LoadAnimationDesc(std::string file) {
 	//Set variables that are necessary
+
+	std::string sceneFile = ExternalFile::Load(file);
+	if (sceneFile.empty()) {
+		std::cout << "no animation specified or could not be found\n";
+		return;
+	}
 	g_framesToRender = 1;
-
-	std::string sceneFile = ExternalFile::Load("Animation.json");
-
 	rapidjson::Document d;
 	ParseResult result = d.Parse(sceneFile.c_str());
 	if (!result) {
@@ -295,30 +262,30 @@ void LoadAnimationDesc() {
 	}
 
 
-	rapidjson::Value& a = *GetValueByPointer(d, "/MetaData");
-	g_animData.Fps = a["Fps"].GetInt();
-	g_animData.Time = a["Time"].GetFloat();
+	rapidjson::Value& MetaData = *GetValueByPointer(d, "/MetaData");
+	g_animData.Fps = MetaData["Fps"].GetInt();
+	g_animData.Time = MetaData["Time"].GetFloat();
 
-	a = *GetValueByPointer(d, "/Instructions");
-	assert(a.IsArray());
+	rapidjson::Value& Instructions = *GetValueByPointer(d, "/Instructions");
+	assert(Instructions.IsArray());
 
-	for (int i = 0; i < a.Size(); i++) {
+	for (int i = 0; i < Instructions.Size(); i++) {
 		Instruction instruction;
 		
 		
-		instruction.Name = a[i]["Name"].GetString();
-		instruction.StartT = a[i]["StartT"].GetFloat();
-		instruction.EndT = a[i]["EndT"].GetFloat();
-		instruction.MoveType = a[i]["MoveType"].GetFloat();
+		instruction.Name = Instructions[i]["Name"].GetString();
+		instruction.StartT = Instructions[i]["StartT"].GetFloat();
+		instruction.EndT = Instructions[i]["EndT"].GetFloat();
+		instruction.MoveType = Instructions[i]["MoveType"].GetFloat();
 
-		instruction.StartPos.x = a[i]["StartPos"][0].GetFloat();
-		instruction.StartPos.y = a[i]["StartPos"][1].GetFloat();
-		instruction.StartPos.z = a[i]["StartPos"][2].GetFloat();
+		instruction.StartPos.x = Instructions[i]["StartPos"][0].GetFloat();
+		instruction.StartPos.y = Instructions[i]["StartPos"][1].GetFloat();
+		instruction.StartPos.z = Instructions[i]["StartPos"][2].GetFloat();
 
 	
-		instruction.EndPos.x = a[i]["EndPos"][0].GetFloat();
-		instruction.EndPos.y = a[i]["EndPos"][1].GetFloat();
-		instruction.EndPos.z = a[i]["EndPos"][2].GetFloat();
+		instruction.EndPos.x = Instructions[i]["EndPos"][0].GetFloat();
+		instruction.EndPos.y = Instructions[i]["EndPos"][1].GetFloat();
+		instruction.EndPos.z = Instructions[i]["EndPos"][2].GetFloat();
 
 		instruction.LocalTime = 0.0f;
 
@@ -328,23 +295,21 @@ void LoadAnimationDesc() {
 	g_framesToRender = g_animData.Fps * g_animData.Time;
 }
 
-
-
 Ray CalculateRay(int i, int j) {
 
 	//NOTE, I and J are flipped as I would like to process each row instead of column first
 	glm::vec3 point = glm::vec3(0, 0, 0);
 
 	float fov = glm::tan(glm::radians(g_fieldOfView) / 2);
-	//float fov = g_fieldOfView;
 
-	float fuckx = j - (g_data.Resolution.x / 2.0f);
-	float fucky = i - (g_data.Resolution.y / 2.0f);
+	float imageX = j - (g_data.Resolution.x / 2.0f);
+	float imageY = i - (g_data.Resolution.y / 2.0f);
 
-	point.x = g_aspectRatio  * ((2 * fuckx) / g_data.Resolution.x) * fov;
-	point.y =  ((2 * fucky)/ g_data.Resolution.y) * -fov;
-	//point.z = -1.0f / glm::tan(glm::radians(g_fieldOfView)/2 );
-	point.z = -449;
+	point.x = g_aspectRatio  * ((2 * imageX) / g_data.Resolution.x) * fov;
+	point.y =  ((2 * imageY)/ g_data.Resolution.y) * -fov;
+
+	//Set viewing plane 1 unit ahead of the camera
+	point.z = g_eye.z + 1;
 
 	Ray ray;
 	ray.dir = glm::normalize(point - g_eye);
@@ -354,121 +319,33 @@ Ray CalculateRay(int i, int j) {
 }
 
 
-bool interSectRaySphere(Sphere* sphere, Ray ray, Hit& hit) {
-	glm::vec3 v = sphere->Pos - ray.origin;
-	float t0 = glm::dot(v, ray.dir);
-
-	float Dsqr = glm::dot(v, v) - (t0 * t0);
-
-	float td = (sphere->Radius * sphere->Radius) - Dsqr;
-
-	if (td < 0) {
-		return false;
-	}
-
-	//tangent to sphere
-	//Find epsilon
-	if (td <= 0.0001) {
-		hit.t = td;
-		return true;
-	}
-
-	//two indersection points
-	hit.t = std::min(t0 + sqrt(td), t0 - sqrt(td));
-	return  true;
-}
-
-bool InterSectRayQuad(Quad* quad, Ray ray, Hit& hit) {
-	glm::vec3 a = quad->Pos1;
-	glm::vec3 b = quad->Pos2;
-	glm::vec3 c = quad->Pos3;
-
-	//1
-	glm::vec3 p = b - a;
-	glm::vec3 q = c - a;
-
-	//2
-	glm::vec3 tmp1 = glm::cross(ray.dir, q);
-
-	//3
-	float dot1 = glm::dot(tmp1, p);
-
-	//4
-	float eps = powf(1, -5);
-	if ((dot1 > -eps) && dot1 < eps) return false;
-
-	//5
-	float f = 1.0f / dot1;
-
-	//6
-	glm::vec3 s = ray.origin - a;
-
-	//7
-	float u = f * glm::dot(s, tmp1);
-
-	//8
-	if ((u < 0.f) || (u > 1.f)) return false;
-
-	//9
-	glm::vec3 tmp2 = glm::cross(s, p);
-
-	//10
-	float v = f * glm::dot(ray.dir, tmp2);
-
-	//11
-	if ((v < 0.f) || (v > 1.f)) return false;
-	//if ((v < 0.f) || (u + v > 1.f)) return 0;
-
-	//12
-	hit.t = f * glm::dot(q, tmp2);
-
-	hit.normal = glm::normalize(glm::cross(q, p));
-
-	return true;
-}
-
 //Returns a properly filled in hit if there is an intersection
 //Otherwise it returns false and hit is undefined
 bool FirstIntersection(Ray& ray, Hit& hit) {
 
-	hit.t = std::numeric_limits<float>::max();
+	float closestT = std::numeric_limits<float>::max();
 
-	//Check sphere
-	for (int i = 0; i < g_quads.size(); i++) {
+	Hit finalHit;
+
+	//Check all geometry
+	for (int i = 0; i < g_geometry.size(); i++) {
 		Hit tempHit;
-		if (InterSectRayQuad(&g_quads[i], ray, tempHit)) {
-			if (tempHit.t < hit.t && tempHit.t >= 0.01) {
-				hit.mat = &g_quads[i].Mat;
-				hit.t = tempHit.t;
-
-				hit.normal = tempHit.normal;
+		if (g_geometry[i]->CalculateIntersection(ray, tempHit)) {
+			if (tempHit.t < closestT && tempHit.t >= 0.01) {
+				tempHit.mat = &g_geometry[i]->m_Material;
+				closestT = tempHit.t;
+				memcpy(&finalHit, &tempHit, sizeof(Hit));
 			}
 		}
 	}
 
-	for (int i = 0; i < g_spheres.size(); i++) {
-		Hit tempHit;
-		if ( interSectRaySphere( &g_spheres[i], ray, tempHit)) {
-			if (tempHit.t < hit.t && tempHit.t >= 0.01) {
-				hit.mat = &g_spheres[i].Mat;
-				hit.t = tempHit.t;
-				//Can optimize here
-				hit.location = ray.origin + (hit.t * ray.dir);
-				hit.normal = glm::normalize(hit.location - g_spheres[i].Pos);
-			}
-		}
-	}
-
-	//calculate the intersection point here
-	hit.location = ray.origin + (hit.t * ray.dir);
+	memcpy(&hit, &finalHit, sizeof(Hit));
 	//Check if the material has been set, if so we have a hit
 	return !(hit.mat == nullptr);
 }
 
 glm::vec3 CalculateSingleLight(Hit hit, LightData light, Ray ray) {
 	
-	 //result = glm::vec3(0);
-
 	glm::vec3 lightVec = glm::normalize(light.Pos - hit.location);
 	
 	//Diffuse
@@ -481,17 +358,12 @@ glm::vec3 CalculateSingleLight(Hit hit, LightData light, Ray ray) {
 
 	//Specular
 	result += light.Spec * hit.mat->Spec * pow(glm::clamp(dot(view, reflected ), 0.0f, 1.0f), g_data.Shininess);
-	//result = hit.normal * 2.0f - 1.0f;
-	return result * 0.45f;
+
+	return result;
 }
 
 glm::vec3 CalculateLighting(Ray ray, Hit hit) {
 	glm::vec3 color = glm::vec3(0);
-
-
-	for (int i = 0; i < g_lights.size(); i++) {
-		color += CalculateSingleLight(hit, g_lights[i], ray);
-	}
 
 	for (int i = 0; i < g_lights.size(); i++) {
 
@@ -504,7 +376,10 @@ glm::vec3 CalculateLighting(Ray ray, Hit hit) {
 		Hit shadowHit = Hit();
 		
 		if (FirstIntersection(shadowRay, shadowHit)) {
-			//Check distance between light and hit
+			//Check distance between light and hit if light is behind hit then do not add color
+			//so there is a shadow
+
+			//Use sqrmagnitude in these calculations for speed
 			float lightVecMag = glm::dot(lightVec, lightVec);
 
 			glm::vec3 hitVec = shadowHit.location - hit.location;
@@ -515,20 +390,15 @@ glm::vec3 CalculateLighting(Ray ray, Hit hit) {
 			}
 		}
 		else {
+			//If no intersection just draw
 			color += CalculateSingleLight(hit, g_lights[i], ray);
 		}
 	}
 
-	//color = glm::clamp(color, 0.0f, 1.0f);
-
 	return color;
 }
 
-
-
 glm::vec3 TraceRay(Ray ray, int maxDepth) {
-
-	
 
 	Hit hit = Hit();
 	bool p = FirstIntersection(ray, hit); //get the first one
@@ -538,62 +408,92 @@ glm::vec3 TraceRay(Ray ray, int maxDepth) {
 	//Calculate the local lighting
 	glm::vec3 color = CalculateLighting(ray, hit);
 
+
+	//Calculate more balances if necessary
 	if (maxDepth > 0 && hit.mat->MatType == MatType::MIRROR) {
 		Ray newRay;
 		newRay.origin = hit.location;
 		newRay.dir = glm::reflect(ray.dir, hit.normal);
 
-		color += TraceRay(newRay, maxDepth - 1);
+		//Reduce brightness on each bounce
+		color += 0.75f * TraceRay(newRay, maxDepth - 1);
 	}
 
-	color = glm::clamp(color, 0.0f, 1.0f);
-
-
-	return color;
+	return glm::clamp(color, 0.0f, 1.0f);
 }
 
-float g_currentTime;
 
+//Moves the spheres based on instruction in between the frame
 void SetUpNextFrame() {
 	g_currentTime += 1.0f/(float)g_animData.Fps;
 
 	//Loop through all instructions to determine where to move each geometry
 	for (int i = 0; i < g_animInstructions.size(); i++) {
 		//Find which object we are trying to move
-		for (int j = 0; j < g_spheres.size(); j++) {
-			if (g_spheres[j].Name.compare(g_animInstructions[i].Name) == 0) {
+		for (int j = 0; j < g_geometry.size(); j++) {
+			if (g_geometry[j]->m_Name.compare(g_animInstructions[i].Name) == 0) {
 				//Check if this animation is active
 				Instruction* instruction = &g_animInstructions[i];
 				if ((g_currentTime >=  instruction->StartT) && (g_currentTime <= instruction->EndT + 0.0001f)) {
-					instruction->LocalTime += 1.0f / (float)g_animData.Fps;
-					g_spheres[i].Pos = glm::lerp(instruction->StartPos, instruction->EndPos, instruction->LocalTime);
+					Sphere* sphere = dynamic_cast<Sphere*>(g_geometry[j]);
+					if (sphere) {
+						instruction->LocalTime += 1.0f / (float)g_animData.Fps;
+						if (instruction->MoveType == 0) {
+							sphere->m_pos = glm::lerp(instruction->StartPos, instruction->EndPos, instruction->LocalTime / (instruction->EndT - instruction->StartT));
+						}
+						//If move type is one it is moving based on a sin wave
+						//Intensity/affected axis is specified by EndPos (0,150,0) means move in a sin wave on the yaxis with a delta of -150 and 150
+						//This is the way because it is alot of work on loading files, and my main focuse is the ray tracer/ animation
+						else if (instruction->MoveType == 1) {
+							sphere->m_pos = (instruction->EndPos * glm::sin(instruction->LocalTime * 3.14159f)) + instruction->StartPos;
+						}
+					}
 				}
-			}
-			
+			}	
 		}
 	}
 }
 
-bool singleFrame = false;
 
-std::chrono::high_resolution_clock::time_point start;
+
+
+
+
 int main(int* argc, char** argv) {
-	int frameCount = 0;
-	
-	start = std::chrono::high_resolution_clock::now();
-	g_eye = glm::vec3(0, 0, -450);
+	std::string sceneName = "";
+	std::string animationName = "";
 
-	
-	LoadScene();
-	LoadAnimationDesc();
+	std::cout << "Enter the scene File .Json file: ";
+	std::cin >> sceneName;
+	std::cout << "Enter the Animation .Json file(Type NA for no file): ";
+	std::cin >> animationName;
+
+
+	int frameCount = 0;
+
+	g_start = std::chrono::high_resolution_clock::now();
+	g_eye = glm::vec3(0, 0, -500);
+
+
+	if (!LoadScene(sceneName)) {
+		int stop = 0;
+
+		std::cout << "type anything and Press enter to Continue...\n";
+		std::cin >> stop;
+		return 0;
+	}
+
+	LoadAnimationDesc(animationName);
+
+	std::cout << "Rendering Scene\n";
 
 	g_aspectRatio = g_data.Resolution.x / g_data.Resolution.y;
 
-	bool doneRendering = false;
-
 	float totalTimeRendering = 0.0f;
 	int framesRendererd = 0;
-	//incrument to start not taken affect until second frame
+
+	int filePaddingZeroCount = std::to_string(g_framesToRender).length();
+
 	do {
 		ExternalFile newFile = ExternalFile();
 
@@ -607,25 +507,28 @@ int main(int* argc, char** argv) {
 				Ray ray = CalculateRay(i, j); //get the primary ray
 				glm::vec3 color = TraceRay(ray, g_data.MaxDepth);
 				CV::ColorBMP realColor = CV::ColorBMP(color.r * 255.0f, color.g * 255.0f, color.b * 255.0f);
-				//CV::ColorBMP color = CV::ColorBMP(((ray.x * 0.5 + 0.5) * 255), ((ray.y * 0.5 + 0.5) * 255),((ray.z * 0.5 + 0.5) * 255)) ;
 				newFile.BMPBuffer(i, j, realColor);
 			}
 		}
 
-		std::string fileName = "OutPut" + std::to_string(frameCount) + ".bmp";
+		//Pad string with zeros.  We assume that 
+		std::string frameNumberString = std::to_string(frameCount);
+		std::string finalNumber = std::string(filePaddingZeroCount - frameNumberString.length(), '0') + frameNumberString;
+
+		std::string fileName = "OutPut" + finalNumber + ".bmp";
 		newFile.BMPWrite(fileName);
 		frameCount++;
 
-		double end = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - start).count();
+		double end = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - g_start).count();
 
 		totalTimeRendering += end / 10000000.0;
 		std::cout << "Frame Completed in: " << end / 10000000.0 << " Seconds" << std::endl;
-		start = std::chrono::high_resolution_clock::now();
+		g_start = std::chrono::high_resolution_clock::now();
 
-		
-		
+
+
 		g_framesToRender--;
-		
+
 		//How to avoid double Check
 		if (g_framesToRender >= 0) {
 			SetUpNextFrame();
@@ -634,5 +537,9 @@ int main(int* argc, char** argv) {
 	} while (g_framesToRender >= 0);
 	std::cout << "Frame Avg: " << totalTimeRendering / (float)framesRendererd << " Seconds" << std::endl;
 
+	int stop = 0;
+
+	std::cout << "type anything and Press enter to Continue...\n";
+	std::cin >> stop;
 	return 0;
 }

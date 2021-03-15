@@ -1,0 +1,41 @@
+{
+    "MetaData" : {
+        "Fps" : 60,
+        "Time" : 5
+    },
+    "Instructions" : [
+        {
+            "Name" : "Sphere1",
+            "StartT" : 0,
+            "EndT" : 5,
+            "MoveType" : 1,
+            "StartPos" : [-30,0,0],
+            "EndPos" : [50, 0,0]
+        },
+        {
+            "Name" : "Sphere2",
+            "StartT" : 0,
+            "EndT" : 5,
+            "MoveType" : 0,
+            "StartPos" : [0, 60, -75],
+            "EndPos" : [150, 60, 75]
+        },
+        {
+            "Name" : "Sphere3",
+            "StartT" : 0,
+            "EndT" : 5,
+            "MoveType" : 0,
+            "StartPos" : [100, 100, 105],
+            "EndPos" : [100, 150, 105]
+        },
+        {
+            "Name" : "Sphere4",
+            "StartT" : 0,
+            "EndT" : 5,
+            "MoveType" : 1,
+            "StartPos" : [50, 75, 15],
+            "EndPos" : [0, 0, 150]
+        }
+
+    ]
+}
